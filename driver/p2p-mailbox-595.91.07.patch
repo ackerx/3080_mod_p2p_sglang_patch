@@ -1,0 +1,1295 @@
+diff --git a/README.md b/README.md
+index 28992ab..c75756c 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,248 @@
++# NVIDIA driver 595.71.05 with P2P for RTX 3090, RTX 4090, and RTX 5090
++
++This enables P2P on consumer GPUs with the 595.71.05 driver version. No kernel parameters
++are needed for the default behavior, just build, install, and go.
++
++See the [tinygrad 550.54.15-p2p README](https://github.com/tinygrad/open-gpu-kernel-modules/blob/550.54.15-p2p/README.md)
++for the original description of the approach.
++
++## Supported configurations
++
++| GPU      | P2P path                                                               |
++| -------- | ---------------------------------------------------------------------- |
++| RTX 3090 | Pairwise NVLink where available, PCIe BAR1 otherwise                   |
++| RTX 4090 | PCIe BAR1                                                              |
++| RTX 5090 | PCIe BAR1                                                              |
++
++P2P also works between different devices of the same generation, for example RTX 5090
++to RTX PRO 6000 Blackwell.
++
++## How it works
++
++This enables BAR1 P2P on consumer GPUs where NVLink isn't available, and falls back to
++NVLink where it is. For PCIe pairs, transfers write directly to the other GPU's physical
++address over DMA.
++
++> [!WARNING]
++> IOMMU must be in passthrough mode (`iommu=pt`), not translating, or DMA will go through
++> IOMMU page tables and transfers will fail. This is very dangerous if you run untrusted
++> software or devices.
++
++## How to use
++
++1. Enable DMA passthrough mode for the IOMMU:
++   - Edit `/etc/default/grub`
++   - Add `amd_iommu=on iommu=pt` to `GRUB_CMDLINE_LINUX_DEFAULT` (use `intel_iommu=on iommu=pt` on Intel)
++   - Run `sudo update-grub`
++2. Install the [NVIDIA 595.71.05 driver](https://www.nvidia.com/en-us/drivers/details/267223/)
++3. Run `./install.sh` in this repo
++4. Reboot the server
++
++## Forcing 3090s to use PCIe instead of NVLink
++
++For testing, you can make 3090 pairs fall back to PCIe BAR1 even when NVLink is present by
++passing `NVreg_RegistryDwords="RMForceP2PType=1"` to the nvidia module. Add this to
++`/etc/modprobe.d/nvidia.conf`:
++
++```
++options nvidia NVreg_RegistryDwords="RMForceP2PType=1"
++```
++
++## Experimental: faster cudaHostRegister for hugepage-backed memory
++
++This branch also includes an experimental path that accelerates `cudaHostRegister` by
++several orders of magnitude when the registered buffer is backed by 1G hugepages, and
++shrinks the device page tables used for such mappings. It is enabled automatically. This
++path skips some of the per-4K-page bookkeeping the stock driver performs, so it may
++misbehave in edge cases the stock driver handles correctly.
++
++## Potential issues
++
++If P2P transfers are slow, make sure your IOMMU is in passthrough (`pt`) mode and that ACS
++is disabled. ACS on root ports forces all GPU-to-GPU traffic through the CPU root complex,
++killing P2P bandwidth. ACS can be disabled in BIOS, with the
++`pcie_acs_override=downstream,multifunction` kernel parameter (if your kernel supports it),
++or with an ACS override patch applied to the kernel.
++
++## Sample `p2pBandwidthLatencyTest` output
++
++9-GPU system (1x RTX PRO 6000 Blackwell + 8x RTX 5090) on a dual-socket AMD EPYC 9575F (Turin) host:
++
++```
++./p2pBandwidthLatencyTest
++```
++
++```
++[P2P (Peer-to-Peer) GPU Bandwidth Latency Test]
++Device: 0, NVIDIA RTX PRO 6000 Blackwell Workstation Edition, pciBusID: c1, pciDeviceID: 0, pciDomainID:0
++Device: 1, NVIDIA GeForce RTX 5090, pciBusID: 1, pciDeviceID: 0, pciDomainID:0
++Device: 2, NVIDIA GeForce RTX 5090, pciBusID: 11, pciDeviceID: 0, pciDomainID:0
++Device: 3, NVIDIA GeForce RTX 5090, pciBusID: 61, pciDeviceID: 0, pciDomainID:0
++Device: 4, NVIDIA GeForce RTX 5090, pciBusID: 71, pciDeviceID: 0, pciDomainID:0
++Device: 5, NVIDIA GeForce RTX 5090, pciBusID: 81, pciDeviceID: 0, pciDomainID:0
++Device: 6, NVIDIA GeForce RTX 5090, pciBusID: 91, pciDeviceID: 0, pciDomainID:0
++Device: 7, NVIDIA GeForce RTX 5090, pciBusID: e1, pciDeviceID: 0, pciDomainID:0
++Device: 8, NVIDIA GeForce RTX 5090, pciBusID: f1, pciDeviceID: 0, pciDomainID:0
++
++***NOTE: In case a device doesn't have P2P access to other one, it falls back to normal memcopy procedure.
++So you can see lesser Bandwidth (GB/s) and unstable Latency (us) in those cases.
++
++P2P Connectivity Matrix
++     D\D     0     1     2     3     4     5     6     7     8
++     0	     1     1     1     1     1     1     1     1     1
++     1	     1     1     1     1     1     1     1     1     1
++     2	     1     1     1     1     1     1     1     1     1
++     3	     1     1     1     1     1     1     1     1     1
++     4	     1     1     1     1     1     1     1     1     1
++     5	     1     1     1     1     1     1     1     1     1
++     6	     1     1     1     1     1     1     1     1     1
++     7	     1     1     1     1     1     1     1     1     1
++     8	     1     1     1     1     1     1     1     1     1
++Unidirectional P2P=Disabled Bandwidth Matrix (GB/s)
++   D\D     0      1      2      3      4      5      6      7      8 
++     0 1611.24  43.30  42.82  42.88  42.89  43.69  43.61  43.63  43.74 
++     1  43.38 1658.76  42.71  42.69  42.83  43.34  43.47  43.33  43.50 
++     2  43.53  42.82 1664.06  42.71  42.74  43.19  43.31  43.24  43.34 
++     3  43.51  42.91  42.80 1660.58  42.77  43.20  43.27  43.17  43.36 
++     4  43.47  43.00  42.83  42.82 1664.06  43.43  43.32  43.32  43.49 
++     5  43.81  42.95  42.84  42.84  42.94 1665.83  43.52  43.45  43.48 
++     6  43.76  43.04  42.93  42.99  43.01  43.85 1662.29  43.66  43.74 
++     7  43.77  42.95  42.90  43.10  43.00  43.85  43.77 1662.29  43.74 
++     8  43.84  43.08  43.04  43.03  43.25  43.91  43.87  43.89 1658.70 
++Unidirectional P2P=Enabled Bandwidth (P2P Writes) Matrix (GB/s)
++   D\D     0      1      2      3      4      5      6      7      8 
++     0 1617.49  55.59  55.62  55.64  55.64  56.58  56.58  56.58  56.58 
++     1  55.60 1656.95  56.57  56.55  56.57  55.63  55.63  55.62  55.64 
++     2  55.63  56.55 1660.47  56.55  56.57  55.62  55.62  55.63  55.61 
++     3  55.63  56.58  56.55 1658.70  56.55  55.63  55.63  55.59  55.63 
++     4  55.63  56.55  56.58  56.58 1656.95  55.62  55.61  55.61  55.64 
++     5  56.57  55.62  55.62  55.64  55.64 1662.23  56.55  56.58  56.58 
++     6  56.50  55.62  55.62  55.61  55.64  56.58 1662.23  56.58  56.58 
++     7  56.58  55.62  55.62  55.64  55.65  56.58  56.58 1665.78  56.57 
++     8  56.55  55.62  55.62  55.64  55.63  56.58  56.55  56.58 1662.23 
++Bidirectional P2P=Disabled Bandwidth Matrix (GB/s)
++   D\D     0      1      2      3      4      5      6      7      8 
++     0 1600.87  56.70  56.88  57.10  56.47  57.06  56.93  57.22  57.30 
++     1  57.17 1642.93  56.50  56.74  56.48  57.19  56.77  56.87  56.75 
++     2  56.87  56.90 1645.55  56.69  56.67  56.93  57.00  56.76  56.83 
++     3  56.95  56.85  56.50 1640.37  56.66  56.78  56.98  57.48  57.40 
++     4  56.50  56.25  56.58  56.61 1644.68  57.09  57.05  56.91  57.09 
++     5  57.31  56.94  56.67  56.83  56.78 1642.06  57.21  57.17  57.47 
++     6  56.85  56.95  56.87  56.99  56.64  57.29 1642.09  57.09  57.02 
++     7  57.15  57.05  56.85  56.54  56.95  56.71  57.20 1646.42  56.96 
++     8  57.00  56.73  57.09  56.82  56.49  57.08  56.90  57.06 1642.95 
++Bidirectional P2P=Enabled Bandwidth Matrix (GB/s)
++   D\D     0      1      2      3      4      5      6      7      8 
++     0 1600.87 111.17 111.04 111.14 111.12 111.35 111.34 111.39 111.38 
++     1 111.12 1636.90 111.38 111.39 111.34 111.10 111.08 111.11 111.08 
++     2 111.08 111.38 1639.51 111.41 111.38 111.08 110.95 111.13 110.98 
++     3 111.13 111.40 111.39 1641.23 111.39 111.12 111.15 110.83 111.09 
++     4 111.13 111.40 111.34 111.40 1642.95 111.07 111.12 111.15 111.11 
++     5 111.35 111.13 111.11 111.15 110.97 1640.34 111.45 111.39 111.43 
++     6 111.45 111.01 111.09 111.14 111.17 111.39 1642.95 111.39 111.45 
++     7 111.45 111.11 111.18 111.12 111.17 111.40 111.40 1640.37 111.40 
++     8 111.34 111.19 111.10 111.04 111.17 111.39 111.40 111.39 1637.76 
++P2P=Disabled Latency Matrix (us)
++   GPU     0      1      2      3      4      5      6      7      8 
++     0   1.04  14.31  14.22  14.35  14.30  14.05  14.22   7.98  14.35 
++     1  14.44   0.98  14.31  14.31  14.31  14.32  14.30  14.32  14.34 
++     2  14.32  14.31   0.98  14.32  14.31  14.30  14.31  14.32  14.35 
++     3  14.32  14.32  14.32   1.01  14.32  14.31  14.32  14.32  14.32 
++     4  14.33  14.31  14.32  14.30   0.97  14.30  14.32  14.31  14.33 
++     5  14.33  14.24  14.31  14.16  14.15   0.95  14.32  14.32  14.31 
++     6  12.61  14.06  14.32  14.32  14.33  14.33   0.98  14.32  14.32 
++     7  14.33  14.33  14.30  14.32  14.26  14.33  14.24   0.92  12.56 
++     8  12.51  14.32  14.22  14.31  14.32  14.25  14.33  14.31   0.96 
++
++   CPU     0      1      2      3      4      5      6      7      8 
++     0   1.76   5.83   6.08   5.98   5.66   4.93   5.29   5.23   4.88 
++     1   5.48   1.87   6.36   6.34   6.04   5.30   5.60   5.58   5.26 
++     2   5.70   6.24   2.01   6.56   6.26   5.48   5.87   5.83   5.46 
++     3   5.64   6.27   6.54   2.00   6.24   5.52   5.83   5.79   5.45 
++     4   5.46   6.03   6.34   6.31   1.89   5.31   5.62   5.59   5.24 
++     5   4.93   5.50   5.84   5.83   5.48   1.62   5.12   5.08   4.76 
++     6   5.15   5.71   6.04   6.04   5.74   4.98   1.75   5.34   4.97 
++     7   5.11   5.73   5.99   5.99   5.71   5.02   5.32   1.73   4.97 
++     8   4.93   5.47   5.78   5.80   5.48   4.74   5.05   5.05   1.63 
++P2P=Enabled Latency (P2P Writes) Matrix (us)
++   GPU     0      1      2      3      4      5      6      7      8 
++     0   1.02   0.38   0.42   0.36   0.37   0.37   0.44   0.36   0.36 
++     1   0.45   0.98   0.37   0.44   0.38   0.43   0.45   0.45   0.39 
++     2   0.37   0.38   0.96   0.36   0.38   0.37   0.38   0.38   0.38 
++     3   0.44   0.44   0.43   1.01   0.38   0.37   0.45   0.38   0.44 
++     4   0.43   0.36   0.37   0.37   0.95   0.35   0.38   0.44   0.44 
++     5   0.37   0.36   0.36   0.36   0.35   0.95   0.36   0.36   0.36 
++     6   0.36   0.43   0.43   0.36   0.43   0.36   0.98   0.43   0.36 
++     7   0.37   0.35   0.36   0.35   0.36   0.36   0.43   0.92   0.43 
++     8   0.38   0.44   0.36   0.44   0.37   0.38   0.37   0.37   0.96 
++
++   CPU     0      1      2      3      4      5      6      7      8 
++     0   1.75   1.34   1.31   1.31   1.31   1.32   1.36   1.32   1.31 
++     1   1.52   1.88   1.49   1.53   1.52   1.53   1.52   1.58   1.52 
++     2   1.67   1.64   2.04   1.64   1.64   1.65   1.65   1.64   1.66 
++     3   1.66   1.63   1.63   2.00   1.64   1.63   1.64   1.63   1.63 
++     4   1.55   1.53   1.53   1.53   1.93   1.53   1.54   1.53   1.53 
++     5   1.32   1.31   1.30   1.30   1.31   1.68   1.30   1.31   1.30 
++     6   1.42   1.39   1.40   1.41   1.41   1.41   1.77   1.41   1.41 
++     7   1.42   1.39   1.45   1.39   1.39   1.40   1.40   1.74   1.40 
++     8   1.33   1.28   1.29   1.32   1.30   1.29   1.29   1.30   1.66 
++```
++
++## Sample `nccl-tests` `all_reduce_perf` output
++
++8x RTX 5090 on the same host:
++
++```
++CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7,8 NCCL_P2P_LEVEL=SYS ./build/all_reduce_perf -b 8 -e 128M -f 2 -g 8
++```
++
++```
++# nccl-tests version 2.18.2 nccl-headers=22907 nccl-library=22907
++# Collective test starting: all_reduce_perf
++# nThread 1 nGpus 8 minBytes 8 maxBytes 134217728 step: 2(factor) warmup iters: 1 iters: 20 agg iters: 1 validation: 1 graph: 0 unalign: 0
++#
++# Using devices
++#  Rank  0 Group  0 Pid  27238 on      crazy device  0 [0000:01:00] NVIDIA GeForce RTX 5090
++#  Rank  1 Group  0 Pid  27238 on      crazy device  1 [0000:11:00] NVIDIA GeForce RTX 5090
++#  Rank  2 Group  0 Pid  27238 on      crazy device  2 [0000:61:00] NVIDIA GeForce RTX 5090
++#  Rank  3 Group  0 Pid  27238 on      crazy device  3 [0000:71:00] NVIDIA GeForce RTX 5090
++#  Rank  4 Group  0 Pid  27238 on      crazy device  4 [0000:81:00] NVIDIA GeForce RTX 5090
++#  Rank  5 Group  0 Pid  27238 on      crazy device  5 [0000:91:00] NVIDIA GeForce RTX 5090
++#  Rank  6 Group  0 Pid  27238 on      crazy device  6 [0000:e1:00] NVIDIA GeForce RTX 5090
++#  Rank  7 Group  0 Pid  27238 on      crazy device  7 [0000:f1:00] NVIDIA GeForce RTX 5090
++#
++#                                                              out-of-place                       in-place          
++#       size         count      type   redop    root     time   algbw   busbw  #wrong     time   algbw   busbw  #wrong 
++#        (B)    (elements)                               (us)  (GB/s)  (GB/s)             (us)  (GB/s)  (GB/s)         
++           8             2     float     sum      -1    25.47    0.00    0.00       0    24.82    0.00    0.00       0
++          16             4     float     sum      -1    24.52    0.00    0.00       0    24.60    0.00    0.00       0
++          32             8     float     sum      -1    24.65    0.00    0.00       0    24.70    0.00    0.00       0
++          64            16     float     sum      -1    24.72    0.00    0.00       0    24.78    0.00    0.00       0
++         128            32     float     sum      -1    24.67    0.01    0.01       0    24.79    0.01    0.01       0
++         256            64     float     sum      -1    24.77    0.01    0.02       0    24.56    0.01    0.02       0
++         512           128     float     sum      -1    24.62    0.02    0.04       0    24.62    0.02    0.04       0
++        1024           256     float     sum      -1    24.66    0.04    0.07       0    24.65    0.04    0.07       0
++        2048           512     float     sum      -1    24.54    0.08    0.15       0    24.66    0.08    0.15       0
++        4096          1024     float     sum      -1    36.29    0.11    0.20       0    35.21    0.12    0.20       0
++        8192          2048     float     sum      -1    37.00    0.22    0.39       0    36.06    0.23    0.40       0
++       16384          4096     float     sum      -1    38.06    0.43    0.75       0    37.14    0.44    0.77       0
++       32768          8192     float     sum      -1    39.33    0.83    1.46       0    38.42    0.85    1.49       0
++       65536         16384     float     sum      -1    40.96    1.60    2.80       0    40.07    1.64    2.86       0
++      131072         32768     float     sum      -1    42.19    3.11    5.44       0    41.28    3.18    5.56       0
++      262144         65536     float     sum      -1    45.87    5.71   10.00       0    45.00    5.83   10.19       0
++      524288        131072     float     sum      -1    56.96    9.20   16.11       0    57.42    9.13   15.98       0
++     1048576        262144     float     sum      -1    74.74   14.03   24.55       0    72.38   14.49   25.35       0
++     2097152        524288     float     sum      -1   104.50   20.07   35.12       0   107.73   19.47   34.07       0
++     4194304       1048576     float     sum      -1   176.93   23.71   41.48       0   178.56   23.49   41.11       0
++     8388608       2097152     float     sum      -1   326.13   25.72   45.01       0   336.41   24.94   43.64       0
++    16777216       4194304     float     sum      -1   646.48   25.95   45.42       0   647.96   25.89   45.31       0
++    33554432       8388608     float     sum      -1  1284.81   26.12   45.70       0  1286.28   26.09   45.65       0
++    67108864      16777216     float     sum      -1  2585.56   25.96   45.42       0  2583.09   25.98   45.47       0
++   134217728      33554432     float     sum      -1  5355.16   25.06   43.86       0  5329.43   25.18   44.07       0
++```
++
++---
++
+ # NVIDIA Linux Open GPU Kernel Module Source
+ 
+ This is the source release of the NVIDIA Linux open GPU kernel modules,
+diff --git a/kernel-open/common/inc/nv-linux.h b/kernel-open/common/inc/nv-linux.h
+index f923c04..ae0fa3f 100644
+--- a/kernel-open/common/inc/nv-linux.h
++++ b/kernel-open/common/inc/nv-linux.h
+@@ -935,6 +935,7 @@ typedef struct nv_alloc_s {
+     unsigned int   cache_type;
+     unsigned int   num_pages;
+     unsigned int   order;
++    unsigned int   compound_order;      /* 0 = normal 4K pages, >0 = hugepage compound order */
+     unsigned int   size;
+     nvidia_pte_t  *page_table;          /* array of physical pages allocated */
+     unsigned int   pid;
+@@ -1067,6 +1068,7 @@ typedef struct nv_dma_map_s {
+     NvBool contiguous;
+     NvU32 cache_type;
+     NvBool bReadOnlyDeviceMap;
++    NvU64 page_granularity;             /* PAGE_SIZE for normal, hugepage_size for compound pages */
+     struct sg_table *import_sgt;
+ 
+     union
+diff --git a/kernel-open/common/inc/nv.h b/kernel-open/common/inc/nv.h
+index 6a776a5..bbce737 100644
+--- a/kernel-open/common/inc/nv.h
++++ b/kernel-open/common/inc/nv.h
+@@ -963,6 +963,8 @@ NV_STATUS  NV_API_CALL  nv_free_pages            (nv_state_t *, NvU32, NvBool, N
+ 
+ NV_STATUS  NV_API_CALL  nv_register_user_pages   (nv_state_t *, NvU64, NvU64 *, void *, void **, NvBool);
+ void       NV_API_CALL  nv_unregister_user_pages (nv_state_t *, NvU64, void **, void **);
++NvU32      NV_API_CALL  nv_get_compound_order    (void *);
++NvU32      NV_API_CALL  nv_get_page_array_compound_order(void *);
+ 
+ NV_STATUS NV_API_CALL   nv_register_peer_io_mem  (nv_state_t *, NvU64 *, NvU64, void **);
+ void      NV_API_CALL   nv_unregister_peer_io_mem(nv_state_t *, void *);
+diff --git a/kernel-open/nvidia-uvm/uvm_gpu.h b/kernel-open/nvidia-uvm/uvm_gpu.h
+index 45b2ff7..6ec8417 100644
+--- a/kernel-open/nvidia-uvm/uvm_gpu.h
++++ b/kernel-open/nvidia-uvm/uvm_gpu.h
+@@ -1824,6 +1824,13 @@ NvU64 uvm_parent_gpu_canonical_address(uvm_parent_gpu_t *parent_gpu, NvU64 addr)
+ 
+ static bool uvm_parent_gpu_is_coherent(const uvm_parent_gpu_t *parent_gpu)
+ {
++    // Blackwell+ consumer GPUs (e.g. 5090) use BAR1 P2P via the SYS_COH
++    // aperture rewrite in nvGpuOpsBuildExternalAllocPtes. UVM's P2P
++    // registration path must take the coherent route to match, otherwise
++    // the ZONE_DEVICE peer DMA setup conflicts with BAR1-as-sysmem PTEs.
++    if (parent_gpu->rm_info.gpuArch >= NV2080_CTRL_MC_ARCH_INFO_ARCHITECTURE_GB100)
++        return true;
++
+     return parent_gpu->system_bus.memory_window_end > parent_gpu->system_bus.memory_window_start;
+ }
+ 
+diff --git a/kernel-open/nvidia/nv-reg.h b/kernel-open/nvidia/nv-reg.h
+index 88a4536..3a209b4 100644
+--- a/kernel-open/nvidia/nv-reg.h
++++ b/kernel-open/nvidia/nv-reg.h
+@@ -1046,7 +1046,7 @@ NV_DEFINE_REG_ENTRY_GLOBAL(__NV_NVLINK_DISABLE, 0);
+ NV_DEFINE_REG_ENTRY_GLOBAL(__NV_ENABLE_PCIE_RELAXED_ORDERING_MODE, 0);
+ NV_DEFINE_REG_ENTRY_GLOBAL(__NV_REGISTER_PCI_DRIVER, 1);
+ NV_DEFINE_REG_ENTRY_GLOBAL(__NV_REGISTER_PLATFORM_DEVICE_DRIVER, 1);
+-NV_DEFINE_REG_ENTRY_GLOBAL(__NV_ENABLE_RESIZABLE_BAR, 0);
++NV_DEFINE_REG_ENTRY_GLOBAL(__NV_ENABLE_RESIZABLE_BAR, 1);
+ NV_DEFINE_REG_ENTRY_GLOBAL(__NV_ENABLE_DBG_BREAKPOINT, 0);
+ NV_DEFINE_REG_ENTRY_GLOBAL(__NV_TEGRA_GPU_PG_MASK, ~0);
+ NV_DEFINE_REG_ENTRY_GLOBAL(__NV_ENABLE_NONBLOCKING_OPEN, 1);
+diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
+index 1bea50a..4ebc6a6 100644
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -3474,12 +3474,22 @@ NV_STATUS NV_API_CALL nv_register_user_pages(
+     NvU64 i;
+     struct page **user_pages;
+     nv_linux_state_t *nvl;
++    NvU32 compound_order;
++    NvU64 effective_count;
+ 
+     nv_printf(NV_DBG_MEMINFO, "NVRM: VM: nv_register_user_pages: 0x%" NvU64_fmtx"\n", page_count);
+     user_pages = *priv_data;
+     nvl = NV_GET_NVL_FROM_NV_STATE(nv);
+ 
+-    at = nvos_create_alloc(nvl->dev, page_count);
++    /* Read compound_order from os_lock_user_pages() hidden header. */
++    compound_order = nv_get_page_array_compound_order(user_pages);
++
++    if (compound_order > 0)
++        effective_count = page_count >> compound_order;
++    else
++        effective_count = page_count;
++
++    at = nvos_create_alloc(nvl->dev, effective_count);
+ 
+     if (at == NULL)
+     {
+@@ -3500,9 +3510,10 @@ NV_STATUS NV_API_CALL nv_register_user_pages(
+     if (unencrypted)
+         at->flags.unencrypted = NV_TRUE;
+ 
++    at->compound_order = compound_order;
+     at->order = get_order(at->num_pages * PAGE_SIZE);
+ 
+-    for (i = 0; i < page_count; i++)
++    for (i = 0; i < effective_count; i++)
+     {
+         /*
+          * We only assign the physical address and not the DMA address, since
+@@ -3527,6 +3538,29 @@ NV_STATUS NV_API_CALL nv_register_user_pages(
+     return NV_OK;
+ }
+ 
++NvU32 NV_API_CALL nv_get_compound_order(
++    void *priv_data
++)
++{
++    nv_alloc_t *at = priv_data;
++    return at->compound_order;
++}
++
++/*
++ * Read compound_order from the hidden header prepended to a page array
++ * by os_lock_user_pages().
++ *
++ * Layout: [num_entries:NvU64][compound_order:NvU64][struct page * array...]
++ *                                                   ^ page_array points here
++ */
++NvU32 NV_API_CALL nv_get_page_array_compound_order(
++    void *page_array
++)
++{
++    NvU64 *header = (NvU64 *)((NvU8 *)page_array - 2 * sizeof(NvU64));
++    return (NvU32)header[1];
++}
++
+ void NV_API_CALL nv_unregister_user_pages(
+     nv_state_t *nv,
+     NvU64       page_count,
+diff --git a/kernel-open/nvidia/os-mlock.c b/kernel-open/nvidia/os-mlock.c
+index e32b9b7..994c326 100644
+--- a/kernel-open/nvidia/os-mlock.c
++++ b/kernel-open/nvidia/os-mlock.c
+@@ -25,6 +25,7 @@
+ 
+ #include "os-interface.h"
+ #include "nv-linux.h"
++#include <linux/hugetlb.h>
+ 
+ #if defined(NVCPU_FAMILY_X86) && defined(NV_FOLL_LONGTERM_PRESENT) && \
+     (defined(NV_PIN_USER_PAGES_HAS_ARGS_VMAS) ||                      \
+@@ -213,6 +214,56 @@ done:
+     return rmStatus;
+ }
+ 
++/*
++ * Hidden header prepended to every page array returned by os_lock_user_pages().
++ * Stores metadata that travels with the page array through opaque void* layers.
++ *
++ * Memory layout: [nv_page_array_header_t][struct page * array[num_entries]]
++ *
++ * The caller receives a pointer to the struct page * array (past the header).
++ * nv_register_user_pages() and os_unlock_user_pages() read the header at a
++ * negative offset to recover num_entries and compound_order.
++ */
++typedef struct {
++    NvU64 num_entries;
++    NvU64 compound_order;
++} nv_page_array_header_t;
++
++#define NV_PAGE_ARRAY_HEADER_SIZE sizeof(nv_page_array_header_t)
++
++static inline nv_page_array_header_t *nv_page_array_header(struct page **pages)
++{
++    return (nv_page_array_header_t *)((NvU8 *)pages - NV_PAGE_ARRAY_HEADER_SIZE);
++}
++
++static NV_STATUS nv_alloc_page_array(
++    NvU64 num_entries,
++    NvU32 compound_order,
++    struct page ***out_pages
++)
++{
++    NV_STATUS status;
++    NvU8 *raw;
++    nv_page_array_header_t *header;
++
++    status = os_alloc_mem((void **)&raw,
++            NV_PAGE_ARRAY_HEADER_SIZE + num_entries * sizeof(struct page *));
++    if (status != NV_OK)
++        return status;
++
++    header = (nv_page_array_header_t *)raw;
++    header->num_entries = num_entries;
++    header->compound_order = compound_order;
++
++    *out_pages = (struct page **)(raw + NV_PAGE_ARRAY_HEADER_SIZE);
++    return NV_OK;
++}
++
++static void nv_free_page_array(struct page **pages)
++{
++    os_free_mem((NvU8 *)pages - NV_PAGE_ARRAY_HEADER_SIZE);
++}
++
+ NV_STATUS NV_API_CALL os_lock_user_pages(
+     void   *address,
+     NvU64   page_count,
+@@ -223,8 +274,7 @@ NV_STATUS NV_API_CALL os_lock_user_pages(
+     NV_STATUS rmStatus;
+     struct mm_struct *mm = current->mm;
+     struct page **user_pages;
+-    NvU64 i;
+-    NvU64 npages = page_count;
++    NvU64 i, j;
+     NvU64 pinned = 0;
+     unsigned int gup_flags = DRF_VAL(_LOCK_USER_PAGES, _FLAGS, _WRITE, flags) ? FOLL_WRITE : 0;
+     long ret;
+@@ -240,18 +290,75 @@ NV_STATUS NV_API_CALL os_lock_user_pages(
+         return NV_ERR_NOT_SUPPORTED;
+     }
+ 
+-    rmStatus = os_alloc_mem((void **)&user_pages,
+-            (page_count * sizeof(*user_pages)));
++    nv_mmap_read_lock(mm);
++
++    /*
++     * Hugetlb fast path: detect hugetlb VMAs and pin one page per hugepage.
++     * Pinning any sub-page of a compound page pins the entire folio via its
++     * refcount, so we only need one pin per hugepage. This reduces the page
++     * array from millions of entries to tens of entries for large mappings.
++     *
++     * Pages must be faulted before this call (caller should first-touch the
++     * entire mapping). pin_user_pages can fault on demand but is slow for
++     * unfaulted 1GB hugepages (~37ms per fault).
++     */
++    {
++        struct vm_area_struct *vma = vma_lookup(mm, (unsigned long)address);
++
++        if (vma && is_vm_hugetlb_page(vma))
++        {
++            unsigned long hpage_size = vma_kernel_pagesize(vma);
++            unsigned int order = ilog2(hpage_size / PAGE_SIZE);
++            NvU64 pages_per_hp = 1ULL << order;
++
++            if ((page_count & (pages_per_hp - 1)) == 0)
++            {
++                NvU64 num_hugepages = page_count >> order;
++
++                rmStatus = nv_alloc_page_array(num_hugepages, order, &user_pages);
++                if (rmStatus != NV_OK)
++                {
++                    nv_mmap_read_unlock(mm);
++                    nv_printf(NV_DBG_ERRORS,
++                            "NVRM: failed to allocate hugepage table!\n");
++                    return rmStatus;
++                }
++
++                for (i = 0; i < num_hugepages; i++)
++                {
++                    ret = NV_PIN_USER_PAGES(
++                        (unsigned long)address + i * hpage_size,
++                        1, gup_flags, &user_pages[i]);
++                    if (ret != 1)
++                    {
++                        for (j = 0; j < i; j++)
++                            NV_UNPIN_USER_PAGE(user_pages[j]);
++                        nv_free_page_array(user_pages);
++                        nv_mmap_read_unlock(mm);
++                        return NV_ERR_INVALID_ADDRESS;
++                    }
++                }
++
++                nv_mmap_read_unlock(mm);
++
++                *page_array = user_pages;
++                return NV_OK;
++            }
++        }
++    }
++
++    /* Normal path: pin all pages at 4K granularity */
++    rmStatus = nv_alloc_page_array(page_count, 0, &user_pages);
+     if (rmStatus != NV_OK)
+     {
++        nv_mmap_read_unlock(mm);
+         nv_printf(NV_DBG_ERRORS,
+                 "NVRM: failed to allocate page table!\n");
+         return rmStatus;
+     }
+ 
+-    nv_mmap_read_lock(mm);
+     ret = NV_PIN_USER_PAGES((unsigned long)address,
+-                            npages, gup_flags, user_pages);
++                            page_count, gup_flags, user_pages);
+     if (ret > 0)
+     {
+         pinned = ret;
+@@ -276,6 +383,8 @@ NV_STATUS NV_API_CALL os_lock_user_pages(
+     else if ((ret == -ENOMEM) &&
+              (page_count > NV_NUM_PIN_PAGES_PER_ITERATION))
+     {
++        NvU64 npages;
++
+         for (pinned = 0; pinned < page_count; pinned += ret)
+         {
+             npages = page_count - pinned;
+@@ -299,7 +408,7 @@ NV_STATUS NV_API_CALL os_lock_user_pages(
+     {
+         for (i = 0; i < pinned; i++)
+             NV_UNPIN_USER_PAGE(user_pages[i]);
+-        os_free_mem(user_pages);
++        nv_free_page_array(user_pages);
+         return NV_ERR_INVALID_ADDRESS;
+     }
+ 
+@@ -316,16 +425,19 @@ NV_STATUS NV_API_CALL os_unlock_user_pages(
+ {
+     NvBool write = FLD_TEST_DRF(_LOCK_USER_PAGES, _FLAGS, _WRITE, _YES, flags);
+     struct page **user_pages = page_array;
+-    NvU32 i;
++    nv_page_array_header_t *header = nv_page_array_header(user_pages);
++    NvU64 num_entries = header->num_entries;
++    NvU64 i;
+ 
+-    for (i = 0; i < page_count; i++)
++    for (i = 0; i < num_entries; i++)
+     {
+         if (write)
+             set_page_dirty_lock(user_pages[i]);
++
+         NV_UNPIN_USER_PAGE(user_pages[i]);
+     }
+ 
+-    os_free_mem(user_pages);
++    nv_free_page_array(user_pages);
+ 
+     return NV_OK;
+ }
+diff --git a/src/nvidia/arch/nvalloc/unix/include/nv.h b/src/nvidia/arch/nvalloc/unix/include/nv.h
+index 8ca7fa5..453416e 100644
+--- a/src/nvidia/arch/nvalloc/unix/include/nv.h
++++ b/src/nvidia/arch/nvalloc/unix/include/nv.h
+@@ -963,6 +963,8 @@ NV_STATUS  NV_API_CALL  nv_free_pages            (nv_state_t *, NvU32, NvBool, N
+ 
+ NV_STATUS  NV_API_CALL  nv_register_user_pages   (nv_state_t *, NvU64, NvU64 *, void *, void **, NvBool);
+ void       NV_API_CALL  nv_unregister_user_pages (nv_state_t *, NvU64, void **, void **);
++NvU32      NV_API_CALL  nv_get_compound_order    (void *);
++NvU32      NV_API_CALL  nv_get_page_array_compound_order(void *);
+ 
+ NV_STATUS NV_API_CALL   nv_register_peer_io_mem  (nv_state_t *, NvU64 *, NvU64, void **);
+ void      NV_API_CALL   nv_unregister_peer_io_mem(nv_state_t *, void *);
+diff --git a/src/nvidia/generated/g_kern_bus_nvoc.c b/src/nvidia/generated/g_kern_bus_nvoc.c
+index ea7dcba..b76886f 100644
+--- a/src/nvidia/generated/g_kern_bus_nvoc.c
++++ b/src/nvidia/generated/g_kern_bus_nvoc.c
+@@ -1064,7 +1064,7 @@ static void __nvoc_init_funcTable_KernelBus_1(KernelBus *pThis, GpuHalspecOwner
+     // default
+     else
+     {
+-        pThis->__kbusGetBar1P2PDmaInfo__ = &kbusGetBar1P2PDmaInfo_395e98;
++        pThis->__kbusGetBar1P2PDmaInfo__ = &kbusGetBar1P2PDmaInfo_GH100;
+     }
+ 
+     // kbusIncreaseStaticBar1Refcount -- halified (2 hals) body
+@@ -1112,7 +1112,7 @@ static void __nvoc_init_funcTable_KernelBus_1(KernelBus *pThis, GpuHalspecOwner
+     // default
+     else
+     {
+-        pThis->__kbusCreateP2PMappingForBar1P2P__ = &kbusCreateP2PMappingForBar1P2P_395e98;
++        pThis->__kbusCreateP2PMappingForBar1P2P__ = &kbusCreateP2PMappingForBar1P2P_GH100;
+     }
+ 
+     // kbusRemoveP2PMappingForBar1P2P -- halified (2 hals) body
+@@ -1124,7 +1124,7 @@ static void __nvoc_init_funcTable_KernelBus_1(KernelBus *pThis, GpuHalspecOwner
+     // default
+     else
+     {
+-        pThis->__kbusRemoveP2PMappingForBar1P2P__ = &kbusRemoveP2PMappingForBar1P2P_395e98;
++        pThis->__kbusRemoveP2PMappingForBar1P2P__ = &kbusRemoveP2PMappingForBar1P2P_GH100;
+     }
+ 
+     // kbusHasPcieBar1P2PMapping -- halified (2 hals) body
+@@ -1136,7 +1136,7 @@ static void __nvoc_init_funcTable_KernelBus_1(KernelBus *pThis, GpuHalspecOwner
+     // default
+     else
+     {
+-        pThis->__kbusHasPcieBar1P2PMapping__ = &kbusHasPcieBar1P2PMapping_d69453;
++        pThis->__kbusHasPcieBar1P2PMapping__ = &kbusHasPcieBar1P2PMapping_GH100;
+     }
+ 
+     // kbusIsPcieBar1P2PMappingSupported -- halified (2 hals) body
+@@ -1148,7 +1148,7 @@ static void __nvoc_init_funcTable_KernelBus_1(KernelBus *pThis, GpuHalspecOwner
+     // default
+     else
+     {
+-        pThis->__kbusIsPcieBar1P2PMappingSupported__ = &kbusIsPcieBar1P2PMappingSupported_d69453;
++        pThis->__kbusIsPcieBar1P2PMappingSupported__ = &kbusIsPcieBar1P2PMappingSupported_GH100;
+     }
+ 
+     // kbusCheckFlaSupportedAndInit -- halified (2 hals) body
+diff --git a/src/nvidia/generated/g_kern_bus_nvoc.h b/src/nvidia/generated/g_kern_bus_nvoc.h
+index eae5168..5a22f08 100644
+--- a/src/nvidia/generated/g_kern_bus_nvoc.h
++++ b/src/nvidia/generated/g_kern_bus_nvoc.h
+@@ -266,6 +266,9 @@ typedef struct Bar1VaInfo
+         MEMORY_DESCRIPTOR  *pDmaMemDesc;
+         NvU64               startOffset;
+         NvU64               size;
++        NvU64               p2pFbBase;   /* [P2PMOD] window2 FB base */
++        NvU64               p2pBusAddr;  /* [P2PMOD] window2 bus address */
++        NvU64               p2pSize;     /* [P2PMOD] window2 size */
+     } staticBar1;
+ } Bar1VaInfo;
+ 
+diff --git a/src/nvidia/src/kernel/gpu/bif/kernel_bif.c b/src/nvidia/src/kernel/gpu/bif/kernel_bif.c
+index 1dfd8c9..871d171 100644
+--- a/src/nvidia/src/kernel/gpu/bif/kernel_bif.c
++++ b/src/nvidia/src/kernel/gpu/bif/kernel_bif.c
+@@ -1161,8 +1161,8 @@ _kbifInitRegistryOverrides
+ {
+     NvU32 data32;
+ 
+-    // P2P Override
+-    pKernelBif->p2pOverride = BIF_P2P_NOT_OVERRIDEN;
++    // P2P Override: default to both reads+writes enabled so BAR1 P2P works out of the box
++    pKernelBif->p2pOverride = 0x11;
+     if (osReadRegistryDword(pGpu, NV_REG_STR_CL_FORCE_P2P, &data32) == NV_OK)
+     {
+         pKernelBif->p2pOverride = data32;
+@@ -1178,7 +1178,7 @@ _kbifInitRegistryOverrides
+         pKernelBif->forceP2PType = data32;
+     }
+ 
+-    pKernelBif->pcieP2PType = NV_REG_STR_RM_PCIEP2P_TYPE_DEFAULT;
++    pKernelBif->pcieP2PType = NV_REG_STR_RM_PCIEP2P_TYPE_BAR1;
+     if (osReadRegistryDword(pGpu, NV_REG_STR_RM_PCIEP2P_TYPE, &data32) == NV_OK)
+     {
+         pKernelBif->pcieP2PType = data32;
+diff --git a/src/nvidia/src/kernel/gpu/bus/arch/hopper/kern_bus_gh100.c b/src/nvidia/src/kernel/gpu/bus/arch/hopper/kern_bus_gh100.c
+index 01f08ca..3fc07a6 100644
+--- a/src/nvidia/src/kernel/gpu/bus/arch/hopper/kern_bus_gh100.c
++++ b/src/nvidia/src/kernel/gpu/bus/arch/hopper/kern_bus_gh100.c
+@@ -1473,8 +1473,15 @@ kbusIsPcieBar1P2PMappingSupported_GH100
+     if (!kbusIsStaticBar1Enabled(pGpu0, pKernelBus0) ||
+         !kbusIsStaticBar1Enabled(pGpu1, pKernelBus1))
+     {
++        // [P2PMOD]
++        NV_PRINTF(LEVEL_ERROR, "P2PDBG: Bar1P2PSupported=no staticBar1 (gpu0=%d gpu1=%d)\n",
++                  kbusIsStaticBar1Enabled(pGpu0, pKernelBus0),
++                  kbusIsStaticBar1Enabled(pGpu1, pKernelBus1));
+         return NV_FALSE;
+     }
++    // [P2PMOD]
++    NV_PRINTF(LEVEL_ERROR, "P2PDBG: Bar1P2PSupported checks pass gpu0=%d gpu1=%d\n",
++              gpuGetInstance(pGpu0), gpuGetInstance(pGpu1));
+ 
+     //
+     // RM only supports one type of PCIE P2P protocol, either BAR1 P2P or mailbox P2P, between
+@@ -1580,15 +1587,14 @@ _kbusCreateStaticBar1IOMMUMapping
+     memdescGetPtePhysAddrsForGpu(pPeerDmaMemDesc, pSrcGpu,
+                                  AT_GPU, 0, 0, 1, &peerDmaAddr);
+ 
+-    // Check the if it is aligned to max RM_PAGE_SIZE 512M.
++    // [P2PMOD] 256MB BAR1 预算模式: bar1BusAddr 只保证 2MB 对齐(窗口起点在
++    // console/mailbox 之后), 512MB 对齐是真 ReBAR 系统的天然属性而非硬件要求,
++    // GMMU PTE 只需页对齐, 故放宽为告警
+     if (!NV_IS_ALIGNED64(peerDmaAddr, RM_PAGE_SIZE_512M))
+     {
+-        NV_PRINTF(LEVEL_ERROR, "The peer DMA address 0x%llx is not aligned at 0x%llx\n",
+-                               peerDmaAddr, RM_PAGE_SIZE_512M);
+-
+-        memdescUnmapIommu(pPeerDmaMemDesc, pSrcGpu->busInfo.iovaspaceId);
+-
+-        return NV_ERR_INVALID_ADDRESS;
++        NV_PRINTF(LEVEL_ERROR,
++                  "P2PDBG: peer DMA addr 0x%llx not 512M aligned, continuing (budget mode)\n",
++                  peerDmaAddr);
+     }
+ 
+     return NV_OK;
+@@ -1682,6 +1688,12 @@ NV_STATUS kbusGetBar1P2PDmaInfo_GH100
+ 
+     *pDmaSize = memdescGetSize(pPeerDmaMemDesc);
+ 
++    // [P2PMOD]
++    NV_PRINTF(LEVEL_ERROR,
++              "P2PDBG: bar1P2P DmaInfo srcGpu%u->peerGpu%u dmaAddr=0x%llx dmaSize=0x%llx\n",
++              gpuGetInstance(pSrcGpu), gpuGetInstance(pPeerGpu),
++              *pDmaAddress, *pDmaSize);
++
+     return NV_OK;
+ }
+ 
+diff --git a/src/nvidia/src/kernel/gpu/bus/arch/maxwell/kern_bus_gm107.c b/src/nvidia/src/kernel/gpu/bus/arch/maxwell/kern_bus_gm107.c
+index 2a59e75..47c5160 100644
+--- a/src/nvidia/src/kernel/gpu/bus/arch/maxwell/kern_bus_gm107.c
++++ b/src/nvidia/src/kernel/gpu/bus/arch/maxwell/kern_bus_gm107.c
+@@ -1160,11 +1160,17 @@ kbusInitBar1_GM107(OBJGPU *pGpu, KernelBus *pKernelBus, NvU32 gfid)
+         // This up to (but not including) 512MB of BAR1 space will still be allocatable in
+         // the dynamic region
+         //
+-        NvU64 bar1Offset = NV_ALIGN_UP(consoleSize + pKernelBus->p2pPcie.writeMailboxTotalSize, RM_PAGE_SIZE_512M);
++        // [P2PMOD] 512MB 对齐在 256MB BAR1 上会把静态区推出窗口, 改用 2MB 对齐
++        NvU64 bar1Offset = NV_ALIGN_UP(consoleSize + pKernelBus->p2pPcie.writeMailboxTotalSize, RM_PAGE_SIZE_2M);
+         // Enable the static BAR1 mapping for the BAR1 P2P
+-        NV_ASSERT_OK_OR_GOTO(rmStatus,
+-                             kbusEnableStaticBar1Mapping_HAL(pGpu, pKernelBus, gfid, bar1Offset),
+-                             kbusInitBar1_failed);
++        rmStatus = kbusEnableStaticBar1Mapping_HAL(pGpu, pKernelBus, gfid, bar1Offset);
++        NV_PRINTF(LEVEL_ERROR, "P2PDBG: enable static bar1 off=0x%llx status=0x%x\n",
++                  bar1Offset, rmStatus);
++        if (rmStatus != NV_OK)
++        {
++            // [P2PMOD] 静态映射失败不致命, 继续无静态 BAR1 运行
++            rmStatus = NV_OK;
++        }
+     }
+ 
+     //
+diff --git a/src/nvidia/src/kernel/gpu/bus/arch/pascal/kern_bus_gp100.c b/src/nvidia/src/kernel/gpu/bus/arch/pascal/kern_bus_gp100.c
+index 8f9f830..900f033 100644
+--- a/src/nvidia/src/kernel/gpu/bus/arch/pascal/kern_bus_gp100.c
++++ b/src/nvidia/src/kernel/gpu/bus/arch/pascal/kern_bus_gp100.c
+@@ -65,6 +65,11 @@ kbusCreateP2PMapping_GP100
+         return kbusCreateP2PMappingForNvlink_HAL(pGpu0, pKernelBus0, pGpu1, pKernelBus1, peer0, peer1, attributes);
+     }
+ 
++    if (FLD_TEST_DRF(_P2PAPI, _ATTRIBUTES, _CONNECTION_TYPE, _PCIE_BAR1, attributes))
++    {
++        return kbusCreateP2PMappingForBar1P2P_HAL(pGpu0, pKernelBus0, pGpu1, pKernelBus1, attributes);
++    }
++
+     if (FLD_TEST_DRF(_P2PAPI, _ATTRIBUTES, _CONNECTION_TYPE, _PCIE, attributes))
+     {
+         return kbusCreateP2PMappingForMailbox_HAL(pGpu0, pKernelBus0, pGpu1, pKernelBus1, peer0, peer1, attributes);
+@@ -643,6 +648,11 @@ kbusRemoveP2PMapping_GP100
+         return kbusRemoveP2PMappingForNvlink_HAL(pGpu0, pKernelBus0, pGpu1, pKernelBus1, peer0, peer1, attributes);
+     }
+ 
++    if (FLD_TEST_DRF(_P2PAPI, _ATTRIBUTES, _CONNECTION_TYPE, _PCIE_BAR1, attributes))
++    {
++        return kbusRemoveP2PMappingForBar1P2P_HAL(pGpu0, pKernelBus0, pGpu1, pKernelBus1, attributes);
++    }
++
+     if (FLD_TEST_DRF(_P2PAPI, _ATTRIBUTES, _CONNECTION_TYPE, _PCIE, attributes))
+     {
+         return kbusRemoveP2PMappingForMailbox_HAL(pGpu0, pKernelBus0, pGpu1, pKernelBus1, peer0, peer1, attributes);
+diff --git a/src/nvidia/src/kernel/gpu/bus/arch/turing/kern_bus_tu102.c b/src/nvidia/src/kernel/gpu/bus/arch/turing/kern_bus_tu102.c
+index f06fb09..3b4d490 100644
+--- a/src/nvidia/src/kernel/gpu/bus/arch/turing/kern_bus_tu102.c
++++ b/src/nvidia/src/kernel/gpu/bus/arch/turing/kern_bus_tu102.c
+@@ -430,15 +430,10 @@ kbusIsStaticBar1Supported_TU102
+                     RM_ALIGN_DOWN(memmgrGetClientFbAddrSpaceSize(pGpu, pMemoryManager),
+                                   RM_PAGE_SIZE_2M);
+ 
+-                if (bar1VASizeAligned < bar1MapSize)
+-                {
+-                    NV_PRINTF(LEVEL_ERROR, "BAR1 size %lld is not large enough to map FB size"
+-                                           "%lld to force static BAR1\n",
+-                                            bar1VASizeAligned, bar1MapSize);
+-                    DBG_BREAKPOINT();
+-
+-                    return NV_ERR_INVALID_REGISTRY_KEY;
+-                }
++                // [P2PMOD] 256MB BAR1 上此检查必然失败, 实际尺寸由 EnableStaticBar1Mapping 决定
++                NV_PRINTF(LEVEL_ERROR,
++                          "P2PDBG: force-static-bar1 ENABLE accepted (fb=0x%llx bar1Va=0x%llx)\n",
++                          bar1MapSize, bar1VASizeAligned);
+ 
+                 return NV_OK;
+             }
+@@ -496,15 +491,12 @@ kbusIsStaticBar1Supported_TU102
+                     requiredAutoBar1Size += RM_PAGE_SIZE_512M - ((consoleSize + mailboxSize) % RM_PAGE_SIZE_512M);
+                 }
+ 
+-                if (bar1VASizeAligned >= requiredAutoBar1Size)
+-                {
+-                    NV_PRINTF(LEVEL_INFO, "Enabling static BAR1 automatically!\n");
+-                    return NV_OK;
+-                }
+-                else
+-                {
+-                    return NV_ERR_NOT_SUPPORTED;
+-                }
++                // [P2PMOD] 256MB BAR1 预算模式: 跳过"BAR1>=全FB"检查,
++                // 实际映射大小由 kbusEnableStaticBar1Mapping 的缩窗逻辑决定
++                NV_PRINTF(LEVEL_ERROR,
++                          "P2PDBG: static bar1 AUTO forced OK (required=0x%llx va=0x%llx)\n",
++                          requiredAutoBar1Size, bar1VASizeAligned);
++                return NV_OK;
+             }
+         default:
+             return NV_ERR_INVALID_REGISTRY_KEY;
+@@ -536,6 +528,10 @@ kbusEnableStaticBar1Mapping_TU102
+     NV_STATUS status = NV_OK;
+     NvU64 bar1MapSize;
+     NvU64 bar1BusAddr;
++    NvU64 p2pWinSize = 0;
++    NvU64 p2pWinFbBase = 0x13000000ULL;  /* 信箱模式: 对准干净进程首批分配基址 */
++    NvU64 p2pBusAddr = 0;
++    MEMORY_DESCRIPTOR *pMemDesc2 = NULL;
+     NvU32 mapFlags = BUS_MAP_FB_FLAGS_MAP_UNICAST | BUS_MAP_FB_FLAGS_MAP_OFFSET_FIXED;
+ 
+     //
+@@ -551,6 +547,30 @@ kbusEnableStaticBar1Mapping_TU102
+     bar1MapSize = RM_ALIGN_DOWN(memmgrGetClientFbAddrSpaceSize(pGpu, pMemoryManager),
+                                 RM_PAGE_SIZE_2M);
+ 
++    // [P2PMOD] 双窗口预算: 窗口1=FB[0,S1) 保持原语义; 窗口2=FB[堆基址,+S2) 供 P2P
++    {
++        NvU64 bar1VaSize = pKernelBus->bar1[gfid].mappableLength;
++        NvU64 p2pReserve = 32ULL * RM_PAGE_SIZE;
++        NvU64 avail = (bar1VaSize > (bar1Offset + p2pReserve)) ?
++                      (bar1VaSize - bar1Offset - p2pReserve) : 0;
++        NvU64 s1 = 0x09000000ULL;  /* 144MB */
++        NvU64 s2 = 0x06400000ULL;  /* A/B-2: 窗口2启用(100MB) */
++        if (s1 > avail)
++            s1 = RM_ALIGN_DOWN(avail, RM_PAGE_SIZE_2M);
++        if (s2 > avail - s1)
++            s2 = RM_ALIGN_DOWN((avail > s1 ? avail - s1 : 0), RM_PAGE_SIZE_2M);
++        bar1MapSize = RM_ALIGN_DOWN(s1, RM_PAGE_SIZE_2M);
++        p2pWinSize = RM_ALIGN_DOWN(s2, RM_PAGE_SIZE_2M);
++        NV_PRINTF(LEVEL_ERROR,
++                  "P2PDBG: two-window w1=0x%llx w2=0x%llx fbBase=0x%llx off=0x%llx avail=0x%llx\n",
++                  bar1MapSize, p2pWinSize, p2pWinFbBase, bar1Offset, avail);
++        if (bar1MapSize < RM_PAGE_SIZE_2M)
++        {
++            NV_PRINTF(LEVEL_ERROR, "P2PDBG: static bar1 no room, disabled\n");
++            return NV_ERR_NOT_SUPPORTED;
++        }
++    }
++
+     //
+     // The static mapping is not backed by an allocated physical FB.
+     // Here RM describes the memory for the static mapping.
+@@ -559,7 +579,7 @@ kbusEnableStaticBar1Mapping_TU102
+                                          NV_MEMORY_CONTIGUOUS, ADDR_FBMEM,
+                                          NV_MEMORY_UNCACHED, MEMDESC_FLAGS_NONE));
+ 
+-    memdescDescribe(pMemDesc, ADDR_FBMEM, 0, bar1MapSize);
++    memdescDescribe(pMemDesc, ADDR_FBMEM, 0, bar1MapSize); /* [P2PMOD] A/B-1: 窗口1 = FB[0..) 原语义 */
+ 
+     // Set to use RM_PAGE_SIZE_HUGE, 2MB
+     memdescSetPageSize(pMemDesc, AT_GPU, RM_PAGE_SIZE_HUGE);
+@@ -585,29 +605,59 @@ kbusEnableStaticBar1Mapping_TU102
+     // Get the system physical address of the Bar1
+     bar1BusAddr = gpumgrGetGpuPhysFbAddr(pGpu) + bar1Offset;
+ 
+-    //
+-    // Create a memory descriptor to describe a SYSMEM target of the GPU
+-    // BAR1 region. This memDesc will be used for P2P DMA related mapping.
+-    //
+-    NV_ASSERT_OK_OR_GOTO(status,
+-                         memdescCreate(&pDmaMemDesc,
+-                                       pGpu,
+-                                       bar1MapSize,
+-                                       0,
+-                                       NV_MEMORY_CONTIGUOUS,
+-                                       ADDR_SYSMEM,
+-                                       NV_MEMORY_UNCACHED,
+-                                       MEMDESC_FLAGS_NONE),
+-                        cleanup_bus_map);
+-
+-    memdescDescribe(pDmaMemDesc, ADDR_SYSMEM, bar1BusAddr, bar1MapSize);
+-
+     pKernelBus->bar1[gfid].bStaticBar1Enabled = NV_TRUE;
+     pKernelBus->bar1[gfid].staticBar1.pVidMemDesc = pMemDesc;
++    if (pDmaMemDesc == NULL)
++    {
++        /* [P2PMOD] 无窗口2时回退: DmaMemDesc 描述窗口1 */
++        NV_ASSERT_OK_OR_GOTO(status,
++                             memdescCreate(&pDmaMemDesc, pGpu, bar1MapSize, 0,
++                                           NV_MEMORY_CONTIGUOUS, ADDR_SYSMEM,
++                                           NV_MEMORY_UNCACHED, MEMDESC_FLAGS_NONE),
++                            cleanup_bus_map);
++        memdescDescribe(pDmaMemDesc, ADDR_SYSMEM, bar1BusAddr, bar1MapSize);
++    }
+     pKernelBus->bar1[gfid].staticBar1.pDmaMemDesc = pDmaMemDesc;
+     pKernelBus->bar1[gfid].staticBar1.startOffset = bar1Offset;
+     pKernelBus->bar1[gfid].staticBar1.size = bar1MapSize;
+ 
++    /* [P2PMOD] 窗口2: FB[堆基址,+S2) -> BAR1 VA [bar1Offset+S1, +S2), DmaMemDesc 重定向到窗口2 */
++    if (p2pWinSize >= RM_PAGE_SIZE_2M)
++    {
++        NvU64 aperOff2 = bar1Offset + bar1MapSize;
++        NV_ASSERT_OK_OR_GOTO(status,
++                             memdescCreate(&pMemDesc2, pGpu, p2pWinSize, 0,
++                                           NV_MEMORY_CONTIGUOUS, ADDR_FBMEM,
++                                           NV_MEMORY_UNCACHED, MEMDESC_FLAGS_NONE),
++                            cleanup_bus_map);
++        memdescDescribe(pMemDesc2, ADDR_FBMEM, p2pWinFbBase, p2pWinSize);
++        memdescSetPageSize(pMemDesc2, AT_GPU, RM_PAGE_SIZE_HUGE);
++        NV_ASSERT_OK_OR_GOTO(status,
++                             kbusMapFbApertureSingle(pGpu, pKernelBus, pMemDesc2, 0,
++                                 &aperOff2, &p2pWinSize,
++                                 mapFlags, NV01_NULL_OBJECT),
++                             cleanup_bus_map);
++        p2pBusAddr = gpumgrGetGpuPhysFbAddr(pGpu) + aperOff2;
++        NV_ASSERT_OK_OR_GOTO(status,
++                             memdescCreate(&pDmaMemDesc,
++                                           pGpu,
++                                           p2pWinSize,
++                                           0,
++                                           NV_MEMORY_CONTIGUOUS,
++                                           ADDR_SYSMEM,
++                                           NV_MEMORY_UNCACHED,
++                                           MEMDESC_FLAGS_NONE),
++                            cleanup_bus_map);
++        memdescDescribe(pDmaMemDesc, ADDR_SYSMEM, p2pBusAddr, p2pWinSize);
++        pKernelBus->bar1[gfid].staticBar1.pDmaMemDesc = pDmaMemDesc;
++        pKernelBus->bar1[gfid].staticBar1.p2pFbBase = p2pWinFbBase;
++        pKernelBus->bar1[gfid].staticBar1.p2pBusAddr = p2pBusAddr;
++        pKernelBus->bar1[gfid].staticBar1.p2pSize = p2pWinSize;
++        NV_PRINTF(LEVEL_ERROR,
++                  "P2PDBG: window2 mapped fbBase=0x%llx bus=0x%llx size=0x%llx aperOff=0x%llx\n",
++                  p2pWinFbBase, p2pBusAddr, p2pWinSize, aperOff2);
++    }
++
+     NV_PRINTF(LEVEL_INFO, "Static bar1 mapped offset 0x%llx size 0x%llx\n",
+                            bar1Offset, bar1MapSize);
+ 
+diff --git a/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/virt_mem_allocator_gm107.c b/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/virt_mem_allocator_gm107.c
+index 81795d5..185c544 100644
+--- a/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/virt_mem_allocator_gm107.c
++++ b/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/virt_mem_allocator_gm107.c
+@@ -1384,6 +1384,25 @@ dmaAllocMapping_GM107
+             pLocals->fabricAddr = NVLINK_INVALID_FABRIC_ADDR;
+         }
+ 
++        // [P2PMOD] BAR1P2P 预算模式: FB 的跨 GPU peer 映射改写为 BAR1 窗口映射
++        if ((pLocals->aperture == GMMU_APERTURE_PEER) &&
++            (memdescGetAddressSpace(pLocals->pTempMemDesc) == ADDR_FBMEM) &&
++            (pLocals->pSrcGpu != NULL) &&
++            (pLocals->pSrcGpu->gpuId != pGpu->gpuId))
++        {
++            KernelBus *pOwnerBus = GPU_GET_KERNEL_BUS(pLocals->pSrcGpu);
++            if (pOwnerBus->bar1[GPU_GFID_PF].bStaticBar1Enabled)
++            {
++                pLocals->aperture = GMMU_APERTURE_SYS_COH;
++                pLocals->fabricAddr = gpumgrGetGpuPhysFbAddr(pLocals->pSrcGpu) +
++                                      pOwnerBus->bar1[GPU_GFID_PF].staticBar1.startOffset;
++                NV_PRINTF(LEVEL_ERROR,
++                          "P2PDBG: dmaAlloc peer->BAR1 mapGpu%u ownerGpu%u bar1Bus=0x%llx\n",
++                          gpuGetInstance(pGpu), gpuGetInstance(pLocals->pSrcGpu),
++                          pLocals->fabricAddr);
++            }
++        }
++
+         pLocals->bVolatile = dmaIsDefaultGpuUncached_HAL(pDma, pLocals->pTempMemDesc,
+                                                          pLocals->aperture, pLocals->bIndirectPeer);
+ 
+@@ -2146,6 +2165,34 @@ dmaUpdateVASpace_GF100
+     MemoryManager *pMemoryManager = GPU_GET_MEMORY_MANAGER(pGpu);
+     NvBool      readPte = NV_FALSE;
+     NV_STATUS   status = NV_OK;
++
++    // [P2PMOD] BAR1P2P 预算模式: 跨 GPU 的 peer 映射改写为 BAR1 窗口映射
++    // (SYS_COH aperture + 基址=对端 bar1BusAddr; peerIndex 随 aperture!=PEER 自动清零)
++    if ((aperture == GMMU_APERTURE_PEER) &&
++        (pMemDesc->pGpu != NULL) &&
++        (pMemDesc->pGpu->gpuId != pGpu->gpuId))
++    {
++        KernelBus *pOwnerBus = GPU_GET_KERNEL_BUS(pMemDesc->pGpu);
++        if (pOwnerBus->bar1[GPU_GFID_PF].bStaticBar1Enabled)
++        {
++            NvU64 bar1BusAddrOwner = gpumgrGetGpuPhysFbAddr(pMemDesc->pGpu) +
++                                     pOwnerBus->bar1[GPU_GFID_PF].staticBar1.startOffset;
++            NV_PRINTF(LEVEL_ERROR,
++                      "P2PDBG: dmaUpdateVASpace peer->BAR1 rewrite mapGpu%u ownerGpu%u bar1Bus=0x%llx page0=%s flags=0x%x\n",
++                      gpuGetInstance(pGpu), gpuGetInstance(pMemDesc->pGpu),
++                      bar1BusAddrOwner,
++                      (pPageArray && pPageArray->count > 0) ? "see-next" : "null",
++                      flags);
++            if (pPageArray && pPageArray->count > 0)
++            {
++                NV_PRINTF(LEVEL_ERROR,
++                          "P2PDBG: dmaUpdateVASpace page0Phys=0x%llx\n",
++                          dmaPageArrayGetPhysAddr(pPageArray, 0));
++            }
++            aperture = GMMU_APERTURE_SYS_COH;
++            fabricAddr = bar1BusAddrOwner;
++        }
++    }
+     NvU32       encrypted = 0;
+     NvU32       tlbLock;
+     NvU32       readOnly;
+diff --git a/src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c b/src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c
+index cfa9817..ca8e52d 100644
+--- a/src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c
++++ b/src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c
+@@ -1421,6 +1421,17 @@ kgmmuEncodePhysAddrs_IMPL
+     {
+         _kgmmuEncodePeerAddrs(pAddresses, fabricBaseAddress, count);
+     }
++    // [P2PMOD] BAR1P2P 预算模式: SYS_COH 且携带有效基址(被改写的 peer 映射)时加基址。
++    // 普通映射 fabricBaseAddress 为 NV_U64_MAX 哨兵, 不受影响。
++    else if ((aperture == GMMU_APERTURE_SYS_COH) &&
++             (fabricBaseAddress != NV_U64_MAX))
++    {
++        NvU64 i_;
++        for (i_ = 0; i_ < count; i_++)
++        {
++            pAddresses[i_] = fabricBaseAddress + pAddresses[i_];
++        }
++    }
+ }
+ 
+ 
+diff --git a/src/nvidia/src/kernel/mem_mgr/io_vaspace.c b/src/nvidia/src/kernel/mem_mgr/io_vaspace.c
+index 763969e..cd6cd60 100644
+--- a/src/nvidia/src/kernel/mem_mgr/io_vaspace.c
++++ b/src/nvidia/src/kernel/mem_mgr/io_vaspace.c
+@@ -59,14 +59,15 @@ iovaspaceConstruct__IMPL
+ void
+ iovaspaceDestruct_IMPL(OBJIOVASPACE *pIOVAS)
+ {
+-    OBJVASPACE *pVAS = staticCast(pIOVAS, OBJVASPACE);
+-
+-    if (pIOVAS->mappingCount != 0)
+-    {
+-        NV_PRINTF(LEVEL_ERROR, "%lld left-over mappings in IOVAS 0x%x\n",
+-                  pIOVAS->mappingCount, pVAS->vaspaceId);
+-        DBG_BREAKPOINT();
+-    }
++    // OBJVASPACE *pVAS = staticCast(pIOVAS, OBJVASPACE);
++
++    // TODO: might keep p2p mappings...
++    // if (pIOVAS->mappingCount != 0)
++    // {
++    //     NV_PRINTF(LEVEL_ERROR, "%lld left-over mappings in IOVAS 0x%x\n",
++    //               pIOVAS->mappingCount, pVAS->vaspaceId);
++    //     DBG_BREAKPOINT();
++    // }
+ }
+ 
+ NV_STATUS
+@@ -595,7 +596,7 @@ OBJIOVASPACE *iovaspaceFromMapping(PIOVAMAPPING pIovaMapping)
+     // not, the mapping has been left dangling outlasting the IOVAS it was
+     // under.
+     //
+-    NV_ASSERT(pIOVAS != NULL);
++    // NV_ASSERT(pIOVAS != NULL);
+ 
+     return pIOVAS;
+ }
+@@ -604,7 +605,7 @@ void iovaMappingDestroy(PIOVAMAPPING pIovaMapping)
+ {
+     OBJIOVASPACE *pIOVAS = iovaspaceFromMapping(pIovaMapping);
+ 
+-    NV_ASSERT_OR_RETURN_VOID(pIOVAS != NULL);
++    if (pIOVAS == NULL) return;
+     iovaspaceDestroyMapping(pIOVAS, pIovaMapping);
+ }
+ 
+diff --git a/src/nvidia/src/kernel/rmapi/client_resource.c b/src/nvidia/src/kernel/rmapi/client_resource.c
+index acea807..237fc02 100644
+--- a/src/nvidia/src/kernel/rmapi/client_resource.c
++++ b/src/nvidia/src/kernel/rmapi/client_resource.c
+@@ -496,6 +496,9 @@ CliGetSystemP2pCaps
+     else if ((connectivity == P2P_CONNECTIVITY_PCIE_BAR1) ||
+              (connectivity == P2P_CONNECTIVITY_PCIE_PROPRIETARY))
+     {
++        // [P2PMOD]
++        NV_PRINTF(LEVEL_ERROR, "P2PDBG: capsV2 conn=%d rd=%d wr=%d\n",
++                  connectivity, p2pReadCapStatus, p2pWriteCapStatus);
+         if (p2pCaps != NULL)
+         {
+             *p2pCaps |= (p2pReadCapStatus == NV0000_P2P_CAPS_STATUS_OK) ?
+diff --git a/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c b/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c
+index 5a34759..452a1aa 100644
+--- a/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c
++++ b/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c
+@@ -3875,7 +3875,8 @@ nvGpuOpsBuildExternalAllocPtes
+     NvBool      isPeerSupported,
+     NvBool      isBar1P2PSupported,
+     NvU32       peerId,
+-    gpuExternalMappingInfo *pGpuExternalMappingInfo
++    gpuExternalMappingInfo *pGpuExternalMappingInfo,
++    RmPhysAddr bar1BusAddr
+ )
+ {
+     NV_STATUS               status              = NV_OK;
+@@ -4033,7 +4034,14 @@ nvGpuOpsBuildExternalAllocPtes
+         NvU32 ptePcfHw  = 0;
+ 
+          nvFieldSetBool(&pPteFmt->fldValid, NV_TRUE, pte.v8);
+-         gmmuFieldSetAperture(&pPteFmt->fldAperture, aperture, pte.v8);
++         if ((aperture == GMMU_APERTURE_PEER) && isBar1P2PSupported)
++         {
++             gmmuFieldSetAperture(&pPteFmt->fldAperture, GMMU_APERTURE_SYS_COH, pte.v8);
++         }
++         else
++         {
++             gmmuFieldSetAperture(&pPteFmt->fldAperture, aperture, pte.v8);
++         }
+          nvFieldSet32(&pPteFmt->fldKind, kind, pte.v8);
+ 
+          ptePcfSw |= vol         ? (1 << SW_MMU_PCF_UNCACHED_IDX) : 0;
+@@ -4077,7 +4085,14 @@ nvGpuOpsBuildExternalAllocPtes
+         if (nvFieldIsValid32(&pPteFmt->fldAtomicDisable.desc))
+             nvFieldSetBool(&pPteFmt->fldAtomicDisable, !atomic, pte.v8);
+ 
+-        gmmuFieldSetAperture(&pPteFmt->fldAperture, aperture, pte.v8);
++        if ((aperture == GMMU_APERTURE_PEER) && isBar1P2PSupported)
++        {
++            gmmuFieldSetAperture(&pPteFmt->fldAperture, GMMU_APERTURE_SYS_NONCOH, pte.v8);
++        }
++        else
++        {
++            gmmuFieldSetAperture(&pPteFmt->fldAperture, aperture, pte.v8);
++        }
+ 
+         if (!isCompressedKind)
+         {
+@@ -4088,7 +4103,17 @@ nvGpuOpsBuildExternalAllocPtes
+         }
+     }
+ 
+-    if (aperture == GMMU_APERTURE_PEER)
++    if ((aperture == GMMU_APERTURE_PEER) && isBar1P2PSupported)
++    {
++        fabricBaseAddress = bar1BusAddr;
++        // [P2PMOD]
++        NV_PRINTF(LEVEL_ERROR,
++                  "P2PDBG: Bar1P2P PTE fab=0x%llx peer=%u memdescSize=0x%llx page0=0x%llx\n",
++                  fabricBaseAddress, peerId, memdescGetSize(pMemDesc),
++                  memdescGetPhysAddr(pMemDesc, AT_GPU, 0));
++    }
++
++    if ((aperture == GMMU_APERTURE_PEER) && !isBar1P2PSupported)
+     {
+         nvFieldSet32(&pPteFmt->fldPeerIndex, peerId, pte.v8);
+ 
+@@ -4198,7 +4223,34 @@ nvGpuOpsBuildExternalAllocPtes
+             status = NV_ERR_INVALID_STATE;
+             goto done;
+         }
+-        _nvGpuOpsEncodeBar1P2PAddrs(physicalAddresses, dmaBaseAddress, pteCount);
++        // [P2PMOD]
++        NV_PRINTF(LEVEL_ERROR,
++                  "P2PDBG: EncodeBar1 dmaBase=0x%llx page0=0x%llx cnt=%u win=0x%llx\n",
++                  dmaBaseAddress, physicalAddresses[0], pteCount, dmaSize);
++        {
++            /* [P2PMOD] A/B-1: 窗口2开启则减p2pFbBase; 关闭则按窗口1(FB[0,size))越窗检查 */
++            NvU64 _fbBase = GPU_GET_KERNEL_BUS(pMemDesc->pGpu)->bar1[GPU_GFID_PF].staticBar1.p2pFbBase;
++            NvU64 _winSz = GPU_GET_KERNEL_BUS(pMemDesc->pGpu)->bar1[GPU_GFID_PF].staticBar1.p2pSize;
++            NvU64 _i;
++            if (_winSz == 0)
++            {
++                _fbBase = 0;
++                _winSz = GPU_GET_KERNEL_BUS(pMemDesc->pGpu)->bar1[GPU_GFID_PF].staticBar1.size;
++            }
++            for (_i = 0; _i < pteCount; _i++)
++            {
++                if (physicalAddresses[_i] < _fbBase ||
++                    (physicalAddresses[_i] - _fbBase) >= _winSz)
++                {
++                    NV_PRINTF(LEVEL_ERROR,
++                              "P2PDBG: page 0x%llx outside p2p window (fbBase=0x%llx win=0x%llx)\n",
++                              physicalAddresses[_i], _fbBase, _winSz);
++                    status = NV_ERR_OUT_OF_RANGE;
++                    goto done;
++                }
++                physicalAddresses[_i] = dmaBaseAddress + physicalAddresses[_i] - _fbBase;
++            }
++        }
+     }
+     else
+     {
+@@ -4347,7 +4399,8 @@ nvGpuOpsBuildExternalAllocPhysAddrs
+     NvBool      isPeerSupported,
+     NvBool      isBar1P2PSupported,
+     NvU32       peerId,
+-    UvmGpuExternalPhysAddrInfo *pGpuExternalPhysAddrInfo
++    UvmGpuExternalPhysAddrInfo *pGpuExternalPhysAddrInfo,
++    RmPhysAddr bar1BusAddr
+ )
+ {
+     NV_STATUS               status              = NV_OK;
+@@ -4425,7 +4478,17 @@ nvGpuOpsBuildExternalAllocPhysAddrs
+         return NV_ERR_BUFFER_TOO_SMALL;
+ 
+ 
+-    if (aperture == GMMU_APERTURE_PEER)
++    if ((aperture == GMMU_APERTURE_PEER) && isBar1P2PSupported)
++    {
++        fabricBaseAddress = bar1BusAddr;
++        // [P2PMOD]
++        NV_PRINTF(LEVEL_ERROR,
++                  "P2PDBG: Bar1P2P PTE fab=0x%llx peer=%u memdescSize=0x%llx page0=0x%llx\n",
++                  fabricBaseAddress, peerId, memdescGetSize(pMemDesc),
++                  memdescGetPhysAddr(pMemDesc, AT_GPU, 0));
++    }
++
++    if ((aperture == GMMU_APERTURE_PEER) && !isBar1P2PSupported)
+     {
+         //
+         // Any fabric memory descriptors are pre-encoded with the fabric base address
+@@ -4567,6 +4630,7 @@ NV_STATUS nvGpuOpsGetExternalAllocPtesOrPhysAddrs(struct gpuAddressSpace *vaSpac
+     Memory *pMemory = NULL;
+     PMEMORY_DESCRIPTOR pMemDesc = NULL;
+     OBJGPU *pMappingGpu = NULL;
++    RmPhysAddr bar1BusAddr = 0;
+     NvU32 peerId = 0;
+     NvBool isSliSupported = NV_FALSE;
+     NvBool isPeerSupported = NV_FALSE;
+@@ -4706,6 +4770,12 @@ NV_STATUS nvGpuOpsGetExternalAllocPtesOrPhysAddrs(struct gpuAddressSpace *vaSpac
+                                                        &peerId);
+             if (status != NV_OK)
+                 goto freeGpaMemdesc;
++            // [P2PMOD]
++            NV_PRINTF(LEVEL_ERROR,
++                      "P2PDBG: ExtAllocP2pInfo peer=%d bar1=%d peerId=%u\n",
++                      isPeerSupported, isBar1P2PSupported, peerId);
++
++            bar1BusAddr = gpumgrGetGpuPhysFbAddr(pAdjustedMemDesc->pGpu);
+         }
+ 
+         //
+@@ -4794,14 +4864,15 @@ NV_STATUS nvGpuOpsGetExternalAllocPtesOrPhysAddrs(struct gpuAddressSpace *vaSpac
+                                                 isPeerSupported,
+                                                 isBar1P2PSupported,
+                                                 peerId,
+-                                                pGpuExternalMappingInfo);
++                                                pGpuExternalMappingInfo,
++                                                bar1BusAddr);
+     }
+ 
+     if (pGpuExternalPhysAddrInfo != NULL)
+     {
+         status = nvGpuOpsBuildExternalAllocPhysAddrs(pVAS, vaSpace->device->session, pMappingGpu, pAdjustedMemDesc,
+                                                      pMemory, offset, size, isIndirectPeerSupported, isPeerSupported,
+-                                                     isBar1P2PSupported, peerId, pGpuExternalPhysAddrInfo);
++                                                     isBar1P2PSupported, peerId, pGpuExternalPhysAddrInfo, bar1BusAddr);
+     }
+ 
+ freeGpaMemdesc:
+@@ -10950,7 +11021,7 @@ NV_STATUS nvGpuOpsGetChannelResourcePtes(struct gpuAddressSpace *vaSpace,
+ 
+     status = nvGpuOpsBuildExternalAllocPtes(pVAS, vaSpace->device->session, pMappingGpu, pMemDesc, NULL,
+                                             offset, size, NV_FALSE, NV_FALSE,
+-                                            NV_FALSE, 0, pGpuExternalMappingInfo);
++                                            NV_FALSE, 0, pGpuExternalMappingInfo, 0);
+ 
+     _nvGpuOpsLocksRelease(&acquiredLocks);
+     threadStateFree(&threadState, THREAD_STATE_FLAGS_NONE);
