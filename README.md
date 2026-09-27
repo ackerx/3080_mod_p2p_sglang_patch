@@ -1,4 +1,21 @@
+# 写在前面
+我只是略懂一些计算机系统结构，本项目所有工作是和人工智能（Artifical Intelligence,AI）一起研究的。
+绝大多数工作是AI做的。我只是在关键环节提出了我的看法。细节我不是很清楚。
+我建议你们使用时，也让AI自己来看。
+
+# 原理
+现有开源驱动实现卡间P2P的原理是利用vbios修改BAR（基地址寄存器）的功能，通过地址翻译，来得到其他卡上的目标显存地址，直接写入数据。
+数据不通过内存存储中转，但指令和数据流仍需要从CPU走。这个开销似乎无法避免。
+于是，问题在于这个地址翻译的空间有多少。
+现有正规显卡的ReBar范围据说可以调到32G，但魔改卡只有最多256MB档。由于没有大bar的vbios，所以就无法直接利用现有的开源驱动。
+我试过可以强制打开P2P，但实际是假的。数据根本写不过去。
+所以剩下的路就是利用这个小小的256MB的窗口来收发数据。
+
+# 各位如何评价老黄？
+
 # mailbox-allreduce — 无 NVLink 消费级双卡的 TP=2 真·P2P Allreduce
+
+[中文](README.md) | [English](README.en.md)
 
 让两块官方禁用 P2P 的 GeForce 卡，在 sglang TP=2 推理里把 allreduce 跑在
 PCIe BAR1 真直连上（10.26 GB/s，≈1.36× 同环境 NCCL），decode CUDA graph
@@ -91,3 +108,4 @@ SGLANG_MAILBOX_AR=1 python -m sglang.launch_server --model <model> --tp 2
 
 实验级开源：单机验证、TP=2、无自动化 CI。欢迎在其它消费卡组合上
 复测并回报数据。
+
